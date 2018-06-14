@@ -19,7 +19,11 @@ licenses(["notice"])  # Apache 2.0
 py_library(
     name = "melody_rnn",
     srcs = ["__init__.py"],
-    visibility = ["//magenta/tools/pip:__subpackages__"],
+    srcs_version = "PY2AND3",
+    visibility = [
+        # internal notebook binary
+        "//magenta/tools/pip:__subpackages__",
+    ],
     deps = [
         ":melody_rnn_model",
     ],
@@ -43,6 +47,10 @@ py_library(
     name = "melody_rnn_model",
     srcs = ["melody_rnn_model.py"],
     srcs_version = "PY2AND3",
+    visibility = [
+        # internal models
+        # internal notebook binary
+    ],
     deps = [
         "//magenta",
         "//magenta/models/shared:events_rnn_model",
@@ -53,7 +61,10 @@ py_library(
     name = "melody_rnn_sequence_generator",
     srcs = ["melody_rnn_sequence_generator.py"],
     srcs_version = "PY2AND3",
-    visibility = ["//magenta/interfaces:generator_interfaces"],
+    visibility = [
+        # internal notebook binary
+        "//magenta/interfaces:generator_interfaces",
+    ],
     deps = [
         ":melody_rnn_model",
         "//magenta",
@@ -78,6 +89,7 @@ py_binary(
 py_test(
     name = "melody_rnn_create_dataset_test",
     srcs = ["melody_rnn_create_dataset_test.py"],
+    srcs_version = "PY2AND3",
     deps = [
         ":melody_rnn_create_dataset",
         ":melody_rnn_model",

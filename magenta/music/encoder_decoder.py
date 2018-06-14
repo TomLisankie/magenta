@@ -43,6 +43,10 @@ encodings also consider whether the event sequence is repeating, and the input
 encoding includes binary counters for timekeeping.
 """
 
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+
 import abc
 
 # internal imports
@@ -105,6 +109,21 @@ class OneHotEncoding(object):
       The decoded event value.
     """
     pass
+
+  def event_to_num_steps(self, unused_event):
+    """Returns the number of time steps corresponding to an event value.
+
+    This is used for normalization when computing metrics. Subclasses with
+    variable step size should override this method.
+
+    Args:
+      unused_event: An event value for which to return the number of steps.
+
+    Returns:
+      The number of steps corresponding to the given event value, defaulting to
+      one.
+    """
+    return 1
 
 
 class EventSequenceEncoderDecoder(object):
@@ -205,6 +224,22 @@ class EventSequenceEncoderDecoder(object):
     """
     pass
 
+  def labels_to_num_steps(self, labels):
+    """Returns the total number of time steps for a sequence of class labels.
+
+    This is used for normalization when computing metrics. Subclasses with
+    variable step size should override this method.
+
+    Args:
+      labels: A list-like sequence of integers in the range
+          [0, self.num_classes).
+
+    Returns:
+      The total number of time steps for the label sequence, defaulting to one
+      per event.
+    """
+    return len(labels)
+
   def encode(self, events):
     """Returns a SequenceExample for the given event sequence.
 
@@ -263,7 +298,7 @@ class EventSequenceEncoderDecoder(object):
     """
     num_classes = len(softmax[0][0])
     chosen_classes = []
-    for i in xrange(len(event_sequences)):
+    for i in range(len(event_sequences)):
       chosen_class = np.random.choice(num_classes, p=softmax[i][-1])
       event = self.class_index_to_event(chosen_class, event_sequences[i])
       event_sequences[i].append(event)
@@ -292,7 +327,7 @@ class EventSequenceEncoderDecoder(object):
           corresponding softmax vectors.
     """
     all_loglik = []
-    for i in xrange(len(event_sequences)):
+    for i in range(len(event_sequences)):
       if len(softmax[i]) >= len(event_sequences[i]):
         raise ValueError(
             'event sequence must be longer than softmax vector (%d events but '
@@ -379,6 +414,23 @@ class OneHotEventSequenceEncoderDecoder(EventSequenceEncoderDecoder):
       An event value.
     """
     return self._one_hot_encoding.decode_event(class_index)
+
+  def labels_to_num_steps(self, labels):
+    """Returns the total number of time steps for a sequence of class labels.
+
+    Args:
+      labels: A list-like sequence of integers in the range
+          [0, self.num_classes).
+
+    Returns:
+      The total number of time steps for the label sequence, as determined by
+      the one-hot encoding.
+    """
+    events = []
+    for label in labels:
+      events.append(self.class_index_to_event(label, events))
+    return sum(self._one_hot_encoding.event_to_num_steps(event)
+               for event in events)
 
 
 class LookbackEventSequenceEncoderDecoder(EventSequenceEncoderDecoder):
@@ -470,7 +522,7 @@ class LookbackEventSequenceEncoderDecoder(EventSequenceEncoderDecoder):
     # Binary time counter giving the metric location of the *next* event.
     n = position + 1
     for i in range(self._binary_counter_bits):
-      input_[offset] = 1.0 if (n / 2 ** i) % 2 else -1.0
+      input_[offset] = 1.0 if (n // 2 ** i) % 2 else -1.0
       offset += 1
 
     # Last event is repeating N bars ago.
@@ -551,6 +603,30 @@ class LookbackEventSequenceEncoderDecoder(EventSequenceEncoderDecoder):
 
     # Return the event for that class index.
     return self._one_hot_encoding.decode_event(class_index)
+
+  def labels_to_num_steps(self, labels):
+    """Returns the total number of time steps for a sequence of class labels.
+
+    This method assumes the event sequence begins with the event corresponding
+    to the first label, which is inconsistent with the `encode` method in
+    EventSequenceEncoderDecoder that uses the second event as the first label.
+    Therefore, if the label sequence includes a lookback to the very first event
+    and that event is a different number of time steps than the default event,
+    this method will give an incorrect answer.
+
+    Args:
+      labels: A list-like sequence of integers in the range
+          [0, self.num_classes).
+
+    Returns:
+      The total number of time steps for the label sequence, as determined by
+      the one-hot encoding.
+    """
+    events = []
+    for label in labels:
+      events.append(self.class_index_to_event(label, events))
+    return sum(self._one_hot_encoding.event_to_num_steps(event)
+               for event in events)
 
 
 class ConditionalEventSequenceEncoderDecoder(object):
@@ -666,6 +742,19 @@ class ConditionalEventSequenceEncoderDecoder(object):
     return self._target_encoder_decoder.class_index_to_event(
         class_index, target_events)
 
+  def labels_to_num_steps(self, labels):
+    """Returns the total number of time steps for a sequence of class labels.
+
+    Args:
+      labels: A list-like sequence of integers in the range
+          [0, self.num_classes).
+
+    Returns:
+      The total number of time steps for the label sequence, as determined by
+      the target encoder/decoder.
+    """
+    return self._target_encoder_decoder.labels_to_num_steps(labels)
+
   def encode(self, control_events, target_events):
     """Returns a SequenceExample for the given event sequence pair.
 
@@ -693,14 +782,15 @@ class ConditionalEventSequenceEncoderDecoder(object):
       labels.append(self.events_to_label(target_events, i + 1))
     return sequence_example_lib.make_sequence_example(inputs, labels)
 
-  def get_inputs_batch(self, control_events, target_event_sequences,
+  def get_inputs_batch(self, control_event_sequences, target_event_sequences,
                        full_length=False):
     """Returns an inputs batch for the given control and target event sequences.
 
     Args:
-      control_events: A single list-like control event sequence.
-      target_event_sequences: A list of list-like target event sequences. Each
-          target event sequence must be shorter than `control_events`.
+      control_event_sequences: A list of list-like control event sequences.
+      target_event_sequences: A list of list-like target event sequences, the
+          same length as `control_event_sequences`. Each target event sequence
+          must be shorter than the corresponding control event sequence.
       full_length: If True, the inputs batch will be for the full length of
           each control/target event sequence pair. If False, the inputs batch
           will only be for the last event of each target event sequence. A full-
@@ -716,11 +806,18 @@ class ConditionalEventSequenceEncoderDecoder(object):
       [len(target_event_sequences), 1, INPUT_SIZE].
 
     Raises:
-      ValueError: If one of the target event sequences is not longer than
-          `control_events`.
+      ValueError: If there are a different number of control and target event
+          sequences, or if one of the control event sequences is not shorter
+          than the corresponding control event sequence.
     """
+    if len(control_event_sequences) != len(target_event_sequences):
+      raise ValueError(
+          '%d control event sequences but %d target event sequences' %
+          (len(control_event_sequences, len(target_event_sequences))))
+
     inputs_batch = []
-    for target_events in target_event_sequences:
+    for control_events, target_events in zip(
+        control_event_sequences, target_event_sequences):
       if len(control_events) <= len(target_events):
         raise ValueError('control event sequence must be longer than target '
                          'event sequence (%d control events but %d target '
@@ -764,6 +861,115 @@ class ConditionalEventSequenceEncoderDecoder(object):
     """
     return self._target_encoder_decoder.evaluate_log_likelihood(
         target_event_sequences, softmax)
+
+
+class OptionalEventSequenceEncoder(EventSequenceEncoderDecoder):
+  """An encoder that augments a base encoder with a disable flag.
+
+  This encoder encodes event sequences consisting of tuples where the first
+  element is a disable flag. When set, the encoding consists of a 1 followed by
+  a zero-encoding the size of the base encoder's input. When unset, the encoding
+  consists of a 0 followed by the base encoder's encoding.
+  """
+
+  def __init__(self, encoder):
+    """Initialize an OptionalEventSequenceEncoder object.
+
+    Args:
+      encoder: The base EventSequenceEncoderDecoder to use.
+    """
+    self._encoder = encoder
+
+  @property
+  def input_size(self):
+    return 1 + self._encoder.input_size
+
+  @property
+  def num_classes(self):
+    raise NotImplementedError
+
+  @property
+  def default_event_label(self):
+    raise NotImplementedError
+
+  def events_to_input(self, events, position):
+    # The event sequence is a list of tuples where the first element is a
+    # disable flag.
+    disable, _ = events[position]
+    if disable:
+      return [1.0] + [0.0] * self._encoder.input_size
+    else:
+      return [0.0] + self._encoder.events_to_input(
+          [event for _, event in events], position)
+
+  def events_to_label(self, events, position):
+    raise NotImplementedError
+
+  def class_index_to_event(self, class_index, events):
+    raise NotImplementedError
+
+
+class MultipleEventSequenceEncoder(EventSequenceEncoderDecoder):
+  """An encoder that concatenates multiple component encoders.
+
+  This class, largely intended for use with control sequences for conditional
+  encoder/decoders, encodes event sequences with multiple encoders and
+  concatenates the encodings.
+
+  Despite being an EventSequenceEncoderDecoder this class does not decode.
+  """
+
+  def __init__(self, encoders, encode_single_sequence=False):
+    """Initialize a MultipleEventSequenceEncoder object.
+
+    Args:
+      encoders: A list of component EventSequenceEncoderDecoder objects whose
+          output will be concatenated.
+      encode_single_sequence: If True, at encoding time all of the encoders will
+          be applied to a single event sequence. If False, each event of the
+          event sequence should be a tuple with size the same as the number of
+          encoders, each of which will be applied to the events in the
+          corresponding position in the tuple, i.e. the first encoder will be
+          applied to the first element of each event tuple, the second encoder
+          will be applied to the second element, etc.
+    """
+    self._encoders = encoders
+    self._encode_single_sequence = encode_single_sequence
+
+  @property
+  def input_size(self):
+    return sum(encoder.input_size for encoder in self._encoders)
+
+  @property
+  def num_classes(self):
+    raise NotImplementedError
+
+  @property
+  def default_event_label(self):
+    raise NotImplementedError
+
+  def events_to_input(self, events, position):
+    input_ = []
+    if self._encode_single_sequence:
+      # Apply all encoders to the event sequence.
+      for encoder in self._encoders:
+        input_ += encoder.events_to_input(events, position)
+    else:
+      # The event sequence is a list of tuples. Apply each encoder to the
+      # elements in the corresponding tuple position.
+      event_sequences = list(zip(*events))
+      if len(event_sequences) != len(self._encoders):
+        raise ValueError(
+            'Event tuple size must be the same as the number of encoders.')
+      for encoder, event_sequence in zip(self._encoders, event_sequences):
+        input_ += encoder.events_to_input(event_sequence, position)
+    return input_
+
+  def events_to_label(self, events, position):
+    raise NotImplementedError
+
+  def class_index_to_event(self, class_index, events):
+    raise NotImplementedError
 
 
 class EncoderPipeline(pipeline.Pipeline):

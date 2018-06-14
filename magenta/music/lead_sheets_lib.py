@@ -139,6 +139,10 @@ class LeadSheet(events_lib.EventSequence):
     return self._melody.end_step
 
   @property
+  def steps(self):
+    return self._melody.steps
+
+  @property
   def steps_per_bar(self):
     return self._melody.steps_per_bar
 
@@ -315,7 +319,7 @@ def extract_lead_sheet_fragments(quantized_sequence,
         (derived from its time signature) is not an integer number of time
         steps.
   """
-  sequences_lib.assert_is_quantized_sequence(quantized_sequence)
+  sequences_lib.assert_is_relative_quantized_sequence(quantized_sequence)
   stats = dict([('empty_chord_progressions',
                  statistics.Counter('empty_chord_progressions'))])
   melodies, melody_stats = melodies_lib.extract_melodies(
@@ -344,4 +348,4 @@ def extract_lead_sheet_fragments(quantized_sequence,
             lead_sheets.append(transposed_lead_sheet)
         else:
           lead_sheets.append(lead_sheet)
-  return lead_sheets, stats.values() + melody_stats + chord_stats
+  return lead_sheets, list(stats.values()) + melody_stats + chord_stats

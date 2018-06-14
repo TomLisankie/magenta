@@ -1,16 +1,16 @@
 new_http_archive(
     name = "pretty_midi",
     build_file = "pretty_midi.BUILD",
-    sha256 = "8326c9c87d5efc91670a5881581eb192b095a1c93afd5fddc91b2232af8e9b9b",
-    strip_prefix = "pretty-midi-0.2.6/pretty_midi",
-    url = "https://github.com/craffel/pretty-midi/archive/0.2.6.tar.gz",
+    sha256 = "f359310473b3e1ed070beda08fbbd7564dc7fed26aec00f06bdb5088394ae4d2",
+    strip_prefix = "pretty-midi-0.2.8/pretty_midi",
+    url = "https://github.com/craffel/pretty-midi/archive/0.2.8.tar.gz",
 )
 
 http_archive(
-    name = "protobuf",
-    sha256 = "2a25c2b71c707c5552ec9afdfb22532a93a339e1ca5d38f163fe4107af08c54c",
-    strip_prefix = "protobuf-3.2.0",
-    url = "https://github.com/google/protobuf/archive/v3.2.0.tar.gz",
+    name = "com_google_protobuf",
+    sha256 = "13d3c15ebfad8c28bee203dd4a0f6e600d2a7d2243bac8b5d0e517466500fcae",
+    strip_prefix = "protobuf-3.5.1",
+    url = "https://github.com/google/protobuf/releases/download/v3.5.1/protobuf-python-3.5.1.tar.gz",
 )
 
 new_http_archive(
@@ -34,7 +34,7 @@ bind(
 new_http_archive(
     name = "mido",
     build_file = "mido.BUILD",
-    sha256 = "7844ff77ab12469504c46e9aa035722a2829e7c72b8b6241c78d356895e88114",
-    strip_prefix = "mido-1.1.17/mido",
-    url = "https://github.com/olemb/mido/archive/1.1.17.tar.gz",
+    sha256 = "870d2f470ce1123324f9ef9676b6c9f2580293dd2a07fdfe00e20a47740e8b8e",
+    strip_prefix = "mido-1.2.6/mido",
+    url = "https://github.com/olemb/mido/archive/1.2.6.tar.gz",
 )

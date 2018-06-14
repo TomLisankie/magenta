@@ -16,18 +16,18 @@
 Input and output wrappers for converting between MIDI and other formats.
 """
 
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+
 from collections import defaultdict
 import sys
-# pylint: disable=g-import-not-at-top
-if sys.version_info.major <= 2:
-  from cStringIO import StringIO
-else:
-  from io import StringIO
 import tempfile
 
 
 # internal imports
 import pretty_midi
+import six
 import tensorflow as tf
 
 from magenta.music import constants
@@ -76,7 +76,7 @@ def midi_to_sequence_proto(midi_data):
     midi = midi_data
   else:
     try:
-      midi = pretty_midi.PrettyMIDI(StringIO(midi_data))
+      midi = pretty_midi.PrettyMIDI(six.BytesIO(midi_data))
     except:
       raise MIDIConversionError('Midi decoding error %s: %s' %
                                 (sys.exc_info()[0], sys.exc_info()[1]))
@@ -107,7 +107,7 @@ def midi_to_sequence_proto(midi_data):
     key_signature = sequence.key_signatures.add()
     key_signature.time = midi_key.time
     key_signature.key = midi_key.key_number % 12
-    midi_mode = midi_key.key_number / 12
+    midi_mode = midi_key.key_number // 12
     if midi_mode == 0:
       key_signature.mode = key_signature.MAJOR
     elif midi_mode == 1:
@@ -304,7 +304,7 @@ def midi_file_to_sequence_proto(midi_file):
   Raises:
     MIDIConversionError: Invalid midi_file.
   """
-  with tf.gfile.Open(midi_file, 'r') as f:
+  with tf.gfile.Open(midi_file, 'rb') as f:
     midi_as_string = f.read()
     return midi_to_sequence_proto(midi_as_string)
 
@@ -327,5 +327,9 @@ def sequence_proto_to_midi_file(sequence, output_file,
   pretty_midi_object = sequence_proto_to_pretty_midi(
       sequence, drop_events_n_seconds_after_last_note)
   with tempfile.NamedTemporaryFile() as temp_file:
-    pretty_midi_object.write(temp_file.name)
+    pretty_midi_object.write(temp_file)
+    # Before copying the file, flush any contents
+    temp_file.flush()
+    # And back the file position to top (not need for Copy but for certainty)
+    temp_file.seek(0)
     tf.gfile.Copy(temp_file.name, output_file, overwrite=True)

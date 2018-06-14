@@ -13,16 +13,23 @@
 # limitations under the License.
 """Provides function to build an event sequence RNN model's graph."""
 
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+
 # internal imports
+import numpy as np
+import six
 import tensorflow as tf
 import magenta
+
+from tensorflow.python.util import nest as tf_nest
 
 
 def make_rnn_cell(rnn_layer_sizes,
                   dropout_keep_prob=1.0,
                   attn_length=0,
-                  base_cell=tf.contrib.rnn.BasicLSTMCell,
-                  state_is_tuple=False):
+                  base_cell=tf.contrib.rnn.BasicLSTMCell):
   """Makes a RNN cell from the given hyperparameters.
 
   Args:
@@ -32,29 +39,28 @@ def make_rnn_cell(rnn_layer_sizes,
         sub-cell.
     attn_length: The size of the attention vector.
     base_cell: The base tf.contrib.rnn.RNNCell to use for sub-cells.
-    state_is_tuple: A boolean specifying whether to use tuple of hidden matrix
-        and cell matrix as a state instead of a concatenated matrix.
 
   Returns:
       A tf.contrib.rnn.MultiRNNCell based on the given hyperparameters.
   """
   cells = []
   for num_units in rnn_layer_sizes:
-    cell = base_cell(num_units, state_is_tuple=state_is_tuple)
+    cell = base_cell(num_units)
+    if attn_length and not cells:
+      # Add attention wrapper to first layer.
+      cell = tf.contrib.rnn.AttentionCellWrapper(
+          cell, attn_length, state_is_tuple=True)
     cell = tf.contrib.rnn.DropoutWrapper(
         cell, output_keep_prob=dropout_keep_prob)
     cells.append(cell)
 
-  cell = tf.contrib.rnn.MultiRNNCell(cells, state_is_tuple=state_is_tuple)
-  if attn_length:
-    cell = tf.contrib.rnn.AttentionCellWrapper(
-        cell, attn_length, state_is_tuple=state_is_tuple)
+  cell = tf.contrib.rnn.MultiRNNCell(cells)
 
   return cell
 
 
-def build_graph(mode, config, sequence_example_file_paths=None):
-  """Builds the TensorFlow graph.
+def get_build_graph_fn(mode, config, sequence_example_file_paths=None):
+  """Returns a function that builds the TensorFlow graph.
 
   Args:
     mode: 'train', 'eval', or 'generate'. Only mode related ops are added to
@@ -63,10 +69,10 @@ def build_graph(mode, config, sequence_example_file_paths=None):
         to use.
     sequence_example_file_paths: A list of paths to TFRecord files containing
         tf.train.SequenceExample protos. Only needed for training and
-        evaluation. May be a sharded file of the form.
+        evaluation.
 
   Returns:
-    A tf.Graph instance which contains the TF ops.
+    A function that builds the TF ops when called.
 
   Raises:
     ValueError: If mode is not 'train', 'eval', or 'generate'.
@@ -84,112 +90,118 @@ def build_graph(mode, config, sequence_example_file_paths=None):
   num_classes = encoder_decoder.num_classes
   no_event_label = encoder_decoder.default_event_label
 
-  with tf.Graph().as_default() as graph:
-    inputs, labels, lengths, = None, None, None
-    state_is_tuple = True
+  def build():
+    """Builds the Tensorflow graph."""
+    inputs, labels, lengths = None, None, None
 
     if mode == 'train' or mode == 'eval':
       inputs, labels, lengths = magenta.common.get_padded_batch(
-          sequence_example_file_paths, hparams.batch_size, input_size)
+          sequence_example_file_paths, hparams.batch_size, input_size,
+          shuffle=mode == 'train')
 
     elif mode == 'generate':
       inputs = tf.placeholder(tf.float32, [hparams.batch_size, None,
                                            input_size])
-      # If state_is_tuple is True, the output RNN cell state will be a tuple
-      # instead of a tensor. During training and evaluation this improves
-      # performance. However, during generation, the RNN cell state is fed
-      # back into the graph with a feed dict. Feed dicts require passed in
-      # values to be tensors and not tuples, so state_is_tuple is set to False.
-      state_is_tuple = False
 
-    cell = make_rnn_cell(hparams.rnn_layer_sizes,
-                         dropout_keep_prob=hparams.dropout_keep_prob,
-                         attn_length=hparams.attn_length,
-                         state_is_tuple=state_is_tuple)
+    cell = make_rnn_cell(
+        hparams.rnn_layer_sizes,
+        dropout_keep_prob=(
+            1.0 if mode == 'generate' else hparams.dropout_keep_prob),
+        attn_length=(
+            hparams.attn_length if hasattr(hparams, 'attn_length') else 0))
 
     initial_state = cell.zero_state(hparams.batch_size, tf.float32)
 
     outputs, final_state = tf.nn.dynamic_rnn(
-        cell, inputs, initial_state=initial_state, parallel_iterations=1,
+        cell, inputs, sequence_length=lengths, initial_state=initial_state,
         swap_memory=True)
 
-    outputs_flat = tf.reshape(outputs, [-1, cell.output_size])
+    outputs_flat = magenta.common.flatten_maybe_padded_sequences(
+        outputs, lengths)
     logits_flat = tf.contrib.layers.linear(outputs_flat, num_classes)
 
     if mode == 'train' or mode == 'eval':
-      labels_flat = tf.reshape(labels, [-1])
-      mask = tf.sequence_mask(lengths)
-      if hparams.skip_first_n_losses:
-        skip = tf.minimum(lengths, hparams.skip_first_n_losses)
-        skip_mask = tf.sequence_mask(skip, maxlen=tf.reduce_max(lengths))
-        mask = tf.logical_and(mask, tf.logical_not(skip_mask))
-      mask = tf.cast(mask, tf.float32)
-      mask_flat = tf.reshape(mask, [-1])
+      labels_flat = magenta.common.flatten_maybe_padded_sequences(
+          labels, lengths)
 
-      num_logits = tf.to_float(tf.reduce_sum(lengths))
+      softmax_cross_entropy = tf.nn.sparse_softmax_cross_entropy_with_logits(
+          labels=labels_flat, logits=logits_flat)
 
-      with tf.control_dependencies(
-          [tf.Assert(tf.greater(num_logits, 0.), [num_logits])]):
-        softmax_cross_entropy = tf.nn.sparse_softmax_cross_entropy_with_logits(
-            labels=labels_flat, logits=logits_flat)
-      loss = tf.reduce_sum(mask_flat * softmax_cross_entropy) / num_logits
-      perplexity = (tf.reduce_sum(mask_flat * tf.exp(softmax_cross_entropy)) /
-                    num_logits)
-
+      predictions_flat = tf.argmax(logits_flat, axis=1)
       correct_predictions = tf.to_float(
-          tf.nn.in_top_k(logits_flat, labels_flat, 1)) * mask_flat
-      accuracy = tf.reduce_sum(correct_predictions) / num_logits * 100
+          tf.equal(labels_flat, predictions_flat))
+      event_positions = tf.to_float(tf.not_equal(labels_flat, no_event_label))
+      no_event_positions = tf.to_float(tf.equal(labels_flat, no_event_label))
 
-      event_positions = (
-          tf.to_float(tf.not_equal(labels_flat, no_event_label)) * mask_flat)
-      event_accuracy = (
-          tf.reduce_sum(tf.multiply(correct_predictions, event_positions)) /
-          tf.reduce_sum(event_positions) * 100)
-
-      no_event_positions = (
-          tf.to_float(tf.equal(labels_flat, no_event_label)) * mask_flat)
-      no_event_accuracy = (
-          tf.reduce_sum(tf.multiply(correct_predictions, no_event_positions)) /
-          tf.reduce_sum(no_event_positions) * 100)
-
-      global_step = tf.Variable(0, trainable=False, name='global_step')
-
-      tf.add_to_collection('loss', loss)
-      tf.add_to_collection('perplexity', perplexity)
-      tf.add_to_collection('accuracy', accuracy)
-      tf.add_to_collection('global_step', global_step)
-
-      summaries = [
-          tf.summary.scalar('loss', loss),
-          tf.summary.scalar('perplexity', perplexity),
-          tf.summary.scalar('accuracy', accuracy),
-          tf.summary.scalar(
-              'event_accuracy', event_accuracy),
-          tf.summary.scalar(
-              'no_event_accuracy', no_event_accuracy),
-      ]
+      # Compute the total number of time steps across all sequences in the
+      # batch. For some models this will be different from the number of RNN
+      # steps.
+      def batch_labels_to_num_steps(batch_labels, lengths):
+        num_steps = 0
+        for labels, length in zip(batch_labels, lengths):
+          num_steps += encoder_decoder.labels_to_num_steps(labels[:length])
+        return np.float32(num_steps)
+      num_steps = tf.py_func(
+          batch_labels_to_num_steps, [labels, lengths], tf.float32)
 
       if mode == 'train':
-        learning_rate = tf.train.exponential_decay(
-            hparams.initial_learning_rate, global_step, hparams.decay_steps,
-            hparams.decay_rate, staircase=True, name='learning_rate')
+        loss = tf.reduce_mean(softmax_cross_entropy)
+        perplexity = tf.exp(loss)
+        accuracy = tf.reduce_mean(correct_predictions)
+        event_accuracy = (
+            tf.reduce_sum(correct_predictions * event_positions) /
+            tf.reduce_sum(event_positions))
+        no_event_accuracy = (
+            tf.reduce_sum(correct_predictions * no_event_positions) /
+            tf.reduce_sum(no_event_positions))
 
-        opt = tf.train.AdamOptimizer(learning_rate)
-        params = tf.trainable_variables()
-        gradients = tf.gradients(loss, params)
-        clipped_gradients, _ = tf.clip_by_global_norm(gradients,
-                                                      hparams.clip_norm)
-        train_op = opt.apply_gradients(zip(clipped_gradients, params),
-                                       global_step)
-        tf.add_to_collection('learning_rate', learning_rate)
+        loss_per_step = tf.reduce_sum(softmax_cross_entropy) / num_steps
+        perplexity_per_step = tf.exp(loss_per_step)
+
+        optimizer = tf.train.AdamOptimizer(learning_rate=hparams.learning_rate)
+
+        train_op = tf.contrib.slim.learning.create_train_op(
+            loss, optimizer, clip_gradient_norm=hparams.clip_norm)
         tf.add_to_collection('train_op', train_op)
 
-        summaries.append(tf.summary.scalar(
-            'learning_rate', learning_rate))
+        vars_to_summarize = {
+            'loss': loss,
+            'metrics/perplexity': perplexity,
+            'metrics/accuracy': accuracy,
+            'metrics/event_accuracy': event_accuracy,
+            'metrics/no_event_accuracy': no_event_accuracy,
+            'metrics/loss_per_step': loss_per_step,
+            'metrics/perplexity_per_step': perplexity_per_step,
+        }
+      elif mode == 'eval':
+        vars_to_summarize, update_ops = tf.contrib.metrics.aggregate_metric_map(
+            {
+                'loss': tf.metrics.mean(softmax_cross_entropy),
+                'metrics/accuracy': tf.metrics.accuracy(
+                    labels_flat, predictions_flat),
+                'metrics/per_class_accuracy':
+                    tf.metrics.mean_per_class_accuracy(
+                        labels_flat, predictions_flat, num_classes),
+                'metrics/event_accuracy': tf.metrics.recall(
+                    event_positions, correct_predictions),
+                'metrics/no_event_accuracy': tf.metrics.recall(
+                    no_event_positions, correct_predictions),
+                'metrics/loss_per_step': tf.metrics.mean(
+                    tf.reduce_sum(softmax_cross_entropy) / num_steps,
+                    weights=num_steps),
+            })
+        for updates_op in update_ops.values():
+          tf.add_to_collection('eval_ops', updates_op)
 
-      if mode == 'eval':
-        summary_op = tf.summary.merge(summaries)
-        tf.add_to_collection('summary_op', summary_op)
+        # Perplexity is just exp(loss) and doesn't need its own update op.
+        vars_to_summarize['metrics/perplexity'] = tf.exp(
+            vars_to_summarize['loss'])
+        vars_to_summarize['metrics/perplexity_per_step'] = tf.exp(
+            vars_to_summarize['metrics/loss_per_step'])
+
+      for var_name, var_value in six.iteritems(vars_to_summarize):
+        tf.summary.scalar(var_name, var_value)
+        tf.add_to_collection(var_name, var_value)
 
     elif mode == 'generate':
       temperature = tf.placeholder(tf.float32, [])
@@ -198,9 +210,12 @@ def build_graph(mode, config, sequence_example_file_paths=None):
       softmax = tf.reshape(softmax_flat, [hparams.batch_size, -1, num_classes])
 
       tf.add_to_collection('inputs', inputs)
-      tf.add_to_collection('initial_state', initial_state)
-      tf.add_to_collection('final_state', final_state)
       tf.add_to_collection('temperature', temperature)
       tf.add_to_collection('softmax', softmax)
+      # Flatten state tuples for metagraph compatibility.
+      for state in tf_nest.flatten(initial_state):
+        tf.add_to_collection('initial_state', state)
+      for state in tf_nest.flatten(final_state):
+        tf.add_to_collection('final_state', state)
 
-  return graph
+  return build
